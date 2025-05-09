@@ -3556,6 +3556,8 @@ static const ppc_variant variants[] =
    bfd_mach_ppc_750, &tdesc_powerpc_750},
   {"7400", "Motorola/IBM PowerPC 7400 (G4)", bfd_arch_powerpc,
    bfd_mach_ppc_7400, &tdesc_powerpc_7400},
+  {"e200", "Motorola PowerPC e200", bfd_arch_powerpc,
+   bfd_mach_ppc_vle, &tdesc_powerpc_e500},
   {"e500", "Motorola PowerPC e500", bfd_arch_powerpc,
    bfd_mach_ppc_e500, &tdesc_powerpc_e500},
 
@@ -4072,23 +4074,27 @@ ppc_dwarf2_frame_init_reg (struct gdbarch *gdbarch, int regnum,
 }
 
 
-/* Return true if a .gnu_attributes section exists in BFD and it
-   indicates we are using SPE extensions OR if a .PPC.EMB.apuinfo
-   section exists in BFD and it indicates that SPE extensions are in
-   use.  Check the .gnu.attributes section first, as the binary might be
-   compiled for SPE, but not actually using SPE instructions.  */
+/* Check the .gnu_attributes section and the .PPC.EMB.apuinfo section
+   to determine if we're using SPE or VLE extensions. Return an enum with
+   flags set for each extension in use */
+typedef enum
+{
+  PPC_EXT_NONE = 0,
+  PPC_EXT_SPE  = 1,
+  PPC_EXT_VLE  = 2
+} ppc_ext_flags_t;
 
-static int
-bfd_uses_spe_extensions (bfd *abfd)
+static ppc_ext_flags_t
+get_bfd_extensions (bfd *abfd)
 {
   asection *sect;
   gdb_byte *contents = NULL;
   bfd_size_type size;
   gdb_byte *ptr;
-  int success = 0;
+  int ext_flags = 0;
 
   if (!abfd)
-    return 0;
+    return PPC_EXT_NONE;
 
 #ifdef HAVE_ELF
   /* Using Tag_GNU_Power_ABI_Vector here is a bit of a hack, as the user
@@ -4097,19 +4103,19 @@ bfd_uses_spe_extensions (bfd *abfd)
   int vector_abi = bfd_elf_get_obj_attr_int (abfd, OBJ_ATTR_GNU,
 					     Tag_GNU_Power_ABI_Vector);
   if (vector_abi == 3)
-    return 1;
+    ext_flags |= PPC_EXT_SPE;
 #endif
 
   sect = bfd_get_section_by_name (abfd, ".PPC.EMB.apuinfo");
   if (!sect)
-    return 0;
+    return PPC_EXT_NONE;
 
   size = bfd_section_size (sect);
   contents = (gdb_byte *) xmalloc (size);
   if (!bfd_get_section_contents (abfd, sect, contents, 0, size))
     {
       xfree (contents);
-      return 0;
+      return PPC_EXT_NONE;
     }
 
   /* Parse the .PPC.EMB.apuinfo section.  The layout is as follows:
@@ -4167,27 +4173,26 @@ bfd_uses_spe_extensions (bfd *abfd)
 	break;
 
       while (data_len)
-	{
-	  unsigned int apuinfo = bfd_get_32 (abfd, ptr);
-	  unsigned int apu = apuinfo >> 16;
-	  ptr += 4;
-	  data_len -= 4;
-
-	  /* The SPE APU is 0x100; the SPEFP APU is 0x101.  Accept
-	     either.  */
-	  if (apu == 0x100 || apu == 0x101)
 	    {
-	      success = 1;
-	      data_len = 0;
-	    }
-	}
+		  unsigned int apuinfo = bfd_get_32 (abfd, ptr);
+		  unsigned int apu = apuinfo >> 16;
+		  ptr += 4;
+		  data_len -= 4;
 
-      if (success)
-	break;
+		  /* Add the extensions we find */
+		  if (apu == PPC_APUINFO_SPE || apu == PPC_APUINFO_EFS)
+		    {
+		      ext_flags |= PPC_EXT_SPE;
+		    }
+		  if (apu == PPC_APUINFO_VLE)
+	        {
+	          ext_flags |= PPC_EXT_VLE;
+		    }
+	  }
     }
 
   xfree (contents);
-  return success;
+  return (ppc_ext_flags_t) ext_flags;
 }
 
 /* These are macros for parsing instruction fields (I.1.6.28)  */
@@ -7658,14 +7663,18 @@ rs6000_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
      which looks at each instruction and determines which unit (and
      which version of it) can execute it.  Grovel through the section
      looking for relevant e500 APUs.  */
+  ppc_ext_flags_t ext_flags = get_bfd_extensions(info.abfd);
+  if (ext_flags) {
+  	arch = info.bfd_arch_info->arch;
 
-  if (bfd_uses_spe_extensions (info.abfd))
-    {
-      arch = info.bfd_arch_info->arch;
-      mach = bfd_mach_ppc_e500;
-      bfd_default_set_arch_mach (&abfd, arch, mach);
-      info.bfd_arch_info = bfd_get_arch_info (&abfd);
-    }
+	if(ext_flags & PPC_EXT_VLE)
+	  mach = bfd_mach_ppc_vle;
+	else
+	  mach = bfd_mach_ppc_e500;
+
+  	bfd_default_set_arch_mach (&abfd, arch, mach);
+  	info.bfd_arch_info = bfd_get_arch_info (&abfd);
+  }
 
   /* Find a default target description which describes our register
      layout, if we do not already have one.  */
